@@ -39,7 +39,7 @@ Parameters:
 Mappings:
   RegionAMI:
     us-east-1:
-      AMI: ami-0c02fb670928629a2
+      AMI: ami-03deb8c961063af8c
     us-west-2:
       AMI: ami-0a8e758f5e873d1c1
     eu-west-1:
