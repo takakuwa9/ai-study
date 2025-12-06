@@ -45,7 +45,7 @@ Mappings:
     eu-west-1:
       AMI: ami-0d2a4a5d69e46ea0b
     ap-northeast-1:
-      AMI: ami-0f1a06c4cea08b753
+      AMI: ami-0136fb5e6714ffc07
 
 Resources:
   # VPC and Networking
@@ -206,6 +206,12 @@ Resources:
               VolumeSize: !Ref EBSVolumeSize
               VolumeType: gp3
               DeleteOnTermination: true
+        InstanceMarketOptions:
+          MarketType: spot
+          SpotOptions:
+            MaxPrice: !Ref SpotMaxPrice
+            SpotInstanceType: persistent
+            InstanceInterruptionBehavior: stop
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -418,12 +424,6 @@ Resources:
         LaunchTemplateId: !Ref StableDiffusionLaunchTemplate
         Version: !GetAtt StableDiffusionLaunchTemplate.LatestVersionNumber
       SubnetId: !Ref PublicSubnet
-      InstanceMarketOptions:
-        MarketType: spot
-        SpotOptions:
-          MaxPrice: !Ref SpotMaxPrice
-          SpotInstanceType: persistent
-          InstanceInterruptionBehavior: stop
       Tags:
         - Key: Name
           Value: StableDiffusionInstance
