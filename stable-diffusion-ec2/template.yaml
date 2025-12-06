@@ -1,0 +1,458 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Stable Diffusion on EC2 Spot Instance - Simple Setup'
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+    
+  InstanceType:
+    Type: String
+    Default: g4dn.xlarge
+    AllowedValues:
+      - g4dn.xlarge
+      - g4dn.2xlarge
+      - g5.xlarge
+      - g5.2xlarge
+    Description: GPU instance type (g4dn.xlarge has 16GB VRAM)
+    
+  SpotMaxPrice:
+    Type: String
+    Default: '0.50'
+    Description: Maximum price to bid for spot instance (USD per hour)
+    
+  ModelName:
+    Type: String
+    Default: 'runwayml/stable-diffusion-v1-5'
+    Description: Hugging Face model ID
+    
+  AllowedSSHCIDR:
+    Type: String
+    Default: '0.0.0.0/0'
+    Description: CIDR block allowed for SSH access (restrict in production)
+    
+  EBSVolumeSize:
+    Type: Number
+    Default: 100
+    Description: EBS volume size in GB
+
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c02fb670928629a2
+    us-west-2:
+      AMI: ami-0a8e758f5e873d1c1
+    eu-west-1:
+      AMI: ami-0d2a4a5d69e46ea0b
+    ap-northeast-1:
+      AMI: ami-0f1a06c4cea08b753
+
+Resources:
+  # VPC and Networking
+  StableDiffusionVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: StableDiffusionVPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: StableDiffusionIGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref StableDiffusionVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref StableDiffusionVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: StableDiffusionPublicSubnet
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref StableDiffusionVPC
+      Tags:
+        - Key: Name
+          Value: StableDiffusionPublicRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # Security Groups
+  StableDiffusionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Stable Diffusion EC2 instance
+      VpcId: !Ref StableDiffusionVPC
+      SecurityGroupIngress:
+        # SSH access
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCIDR
+          Description: SSH access
+        # FastAPI port (8000)
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: FastAPI inference API
+        # Automatic1111 WebUI (7860)
+        - IpProtocol: tcp
+          FromPort: 7860
+          ToPort: 7860
+          CidrIp: 0.0.0.0/0
+          Description: Stable Diffusion WebUI
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: StableDiffusionSG
+
+  # IAM Role for EC2 to access S3
+  StableDiffusionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub 'arn:aws:s3:::${StableDiffusionBucket}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt StableDiffusionBucket.Arn
+      Tags:
+        - Key: Name
+          Value: StableDiffusionRole
+
+  StableDiffusionInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref StableDiffusionRole
+
+  # S3 Bucket for models and results
+  StableDiffusionBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'stable-diffusion-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Name
+          Value: StableDiffusionBucket
+
+  # EC2 Spot Instance
+  StableDiffusionLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: StableDiffusionTemplate
+      LaunchTemplateData:
+        ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !GetAtt StableDiffusionInstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref StableDiffusionSecurityGroup
+        KeyName: !Ref KeyPairName
+        BlockDeviceMappings:
+          - DeviceName: /dev/sda1
+            Ebs:
+              VolumeSize: !Ref EBSVolumeSize
+              VolumeType: gp3
+              DeleteOnTermination: true
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+            
+            # Log output
+            exec > >(tee -a /var/log/user-data.log)
+            exec 2>&1
+            
+            echo "Starting Stable Diffusion setup..."
+            
+            # Update system
+            apt-get update
+            apt-get upgrade -y
+            
+            # Install required packages
+            apt-get install -y \
+              python3-pip \
+              python3-venv \
+              git \
+              wget \
+              curl \
+              build-essential \
+              libssl-dev \
+              libffi-dev \
+              python3-dev \
+              nvidia-driver-525
+            
+            # Create application directory
+            mkdir -p /opt/stable-diffusion
+            cd /opt/stable-diffusion
+            
+            # Create Python virtual environment
+            python3 -m venv venv
+            source venv/bin/activate
+            
+            # Upgrade pip
+            pip install --upgrade pip
+            
+            # Install Python dependencies
+            pip install \
+              torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 \
+              diffusers \
+              transformers \
+              accelerate \
+              safetensors \
+              fastapi \
+              uvicorn \
+              pillow \
+              boto3 \
+              python-multipart
+            
+            # Create inference script
+            cat > inference_api.py << 'EOF'
+            import os
+            import torch
+            from fastapi import FastAPI, File, UploadFile, Form
+            from fastapi.responses import FileResponse
+            from diffusers import StableDiffusionPipeline
+            import io
+            from PIL import Image
+            import uuid
+            import boto3
+            
+            app = FastAPI(title="Stable Diffusion API")
+            
+            # Initialize model
+            MODEL_ID = "${ModelName}"
+            DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            print(f"Loading model: {MODEL_ID}")
+            print(f"Using device: {DEVICE}")
+            
+            pipe = StableDiffusionPipeline.from_pretrained(
+                MODEL_ID,
+                torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                use_safetensors=True
+            )
+            pipe = pipe.to(DEVICE)
+            
+            # Enable optimization
+            pipe.enable_attention_slicing()
+            
+            # S3 client
+            s3_client = boto3.client('s3')
+            bucket_name = "${StableDiffusionBucket}"
+            
+            @app.get("/health")
+            async def health():
+                return {"status": "ok", "device": DEVICE, "model": MODEL_ID}
+            
+            @app.post("/generate")
+            async def generate_image(
+                prompt: str = Form(...),
+                negative_prompt: str = Form(default=""),
+                num_inference_steps: int = Form(default=50),
+                guidance_scale: float = Form(default=7.5),
+                save_to_s3: bool = Form(default=False)
+            ):
+                try:
+                    print(f"Generating image with prompt: {prompt}")
+                    
+                    # Generate image
+                    with torch.no_grad():
+                        image = pipe(
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale
+                        ).images[0]
+                    
+                    # Save to file
+                    image_id = str(uuid.uuid4())
+                    image_path = f"/tmp/{image_id}.png"
+                    image.save(image_path)
+                    
+                    # Upload to S3 if requested
+                    if save_to_s3:
+                        try:
+                            s3_key = f"results/{image_id}.png"
+                            s3_client.upload_file(image_path, bucket_name, s3_key)
+                            s3_url = f"s3://{bucket_name}/{s3_key}"
+                            print(f"Image saved to S3: {s3_url}")
+                        except Exception as e:
+                            print(f"S3 upload error: {e}")
+                    
+                    return FileResponse(image_path, media_type="image/png", filename=f"{image_id}.png")
+                
+                except Exception as e:
+                    print(f"Error during generation: {e}")
+                    raise
+            
+            @app.post("/generate-json")
+            async def generate_image_json(
+                prompt: str = Form(...),
+                negative_prompt: str = Form(default=""),
+                num_inference_steps: int = Form(default=50),
+                guidance_scale: float = Form(default=7.5)
+            ):
+                try:
+                    # Generate image
+                    with torch.no_grad():
+                        image = pipe(
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale
+                        ).images[0]
+                    
+                    # Save to bytes
+                    img_bytes = io.BytesIO()
+                    image.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    # Save to S3
+                    image_id = str(uuid.uuid4())
+                    s3_key = f"results/{image_id}.png"
+                    s3_client.upload_fileobj(img_bytes, bucket_name, s3_key)
+                    s3_url = f"s3://{bucket_name}/{s3_key}"
+                    
+                    return {
+                        "status": "success",
+                        "image_id": image_id,
+                        "s3_url": s3_url,
+                        "prompt": prompt
+                    }
+                
+                except Exception as e:
+                    return {"status": "error", "message": str(e)}
+            
+            if __name__ == "__main__":
+                import uvicorn
+                uvicorn.run(app, host="0.0.0.0", port=8000)
+            EOF
+            
+            # Create systemd service
+            cat > /etc/systemd/system/stable-diffusion.service << 'EOF'
+            [Unit]
+            Description=Stable Diffusion FastAPI Service
+            After=network.target
+            
+            [Service]
+            Type=simple
+            User=root
+            WorkingDirectory=/opt/stable-diffusion
+            Environment="PATH=/opt/stable-diffusion/venv/bin"
+            ExecStart=/opt/stable-diffusion/venv/bin/python inference_api.py
+            Restart=always
+            RestartSec=10
+            StandardOutput=journal
+            StandardError=journal
+            
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+            
+            # Enable and start service
+            systemctl daemon-reload
+            systemctl enable stable-diffusion
+            systemctl start stable-diffusion
+            
+            echo "Stable Diffusion setup completed!"
+            echo "Access API at: http://<instance-ip>:8000/docs"
+            touch /opt/stable-diffusion/setup-complete.txt
+
+  StableDiffusionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref StableDiffusionLaunchTemplate
+        Version: !GetAtt StableDiffusionLaunchTemplate.LatestVersionNumber
+      SubnetId: !Ref PublicSubnet
+      InstanceMarketOptions:
+        MarketType: spot
+        SpotOptions:
+          MaxPrice: !Ref SpotMaxPrice
+          SpotInstanceType: persistent
+          InstanceInterruptionBehavior: stop
+      Tags:
+        - Key: Name
+          Value: StableDiffusionInstance
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref StableDiffusionInstance
+    Export:
+      Name: !Sub '${AWS::StackName}-InstanceId'
+
+  PublicIP:
+    Description: Public IP address of the instance
+    Value: !GetAtt StableDiffusionInstance.PublicIp
+    Export:
+      Name: !Sub '${AWS::StackName}-PublicIP'
+
+  APIEndpoint:
+    Description: FastAPI endpoint
+    Value: !Sub 'http://${StableDiffusionInstance.PublicIp}:8000/docs'
+    Export:
+      Name: !Sub '${AWS::StackName}-APIEndpoint'
+
+  S3BucketName:
+    Description: S3 bucket for models and results
+    Value: !Ref StableDiffusionBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3Bucket'
+
+  SSHCommand:
+    Description: SSH command to connect to instance
+    Value: !Sub 'ssh -i <your-key.pem> ubuntu@${StableDiffusionInstance.PublicIp}'

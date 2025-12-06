@@ -1,0 +1,123 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+.env
+*.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+.directory
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+*.swp
+*~
+
+# AWS
+.aws/
+aws-credentials
+credentials.json
+
+# EC2 Keys
+*.pem
+*.key
+stable-diffusion-key.pem
+~/.ssh/
+
+# Generated files
+.terraform/
+terraform.tfstate*
+*.tfplan
+
+# Local configuration
+local.env
+.env.local
+.env.*.local
+
+# Model files (large)
+*.ckpt
+*.safetensors
+models/
+checkpoints/
+
+# Output files
+output/
+results/
+*.png
+*.jpg
+*.jpeg
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Node (if needed)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Project specific
+.vscode-profile
+session.lock
