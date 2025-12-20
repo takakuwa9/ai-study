@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Stable Diffusion on EC2 Spot Instance - Simple Setup'
+Description: 'Stable Diffusion on EC2 Spot Instance - Memory Optimized'
 
 Parameters:
   KeyPairName:
@@ -8,13 +8,13 @@ Parameters:
     
   InstanceType:
     Type: String
-    Default: g4dn.xlarge
+    Default: g4dn.2xlarge
     AllowedValues:
       - g4dn.xlarge
       - g4dn.2xlarge
       - g5.xlarge
       - g5.2xlarge
-    Description: GPU instance type (g4dn.xlarge has 16GB VRAM)
+    Description: GPU instance type (g4dn.2xlarge has 24GB VRAM, 8 vCPU quota)
     
   SpotMaxPrice:
     Type: String
@@ -23,7 +23,7 @@ Parameters:
     
   ModelName:
     Type: String
-    Default: 'runwayml/stable-diffusion-v1-5'
+    Default: 'hakurei/waifu-diffusion'
     Description: Hugging Face model ID
     
   AllowedSSHCIDR:
@@ -45,7 +45,7 @@ Mappings:
     eu-west-1:
       AMI: ami-0d2a4a5d69e46ea0b
     ap-northeast-1:
-      AMI: ami-0f1a06c4cea08b753
+      AMI: ami-0136fb5e6714ffc07
 
 Resources:
   # VPC and Networking
@@ -206,6 +206,12 @@ Resources:
               VolumeSize: !Ref EBSVolumeSize
               VolumeType: gp3
               DeleteOnTermination: true
+        InstanceMarketOptions:
+          MarketType: spot
+          SpotOptions:
+            MaxPrice: !Ref SpotMaxPrice
+            SpotInstanceType: persistent
+            InstanceInterruptionBehavior: stop
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
@@ -246,8 +252,11 @@ Resources:
             pip install --upgrade pip
             
             # Install Python dependencies
+            # PyTorch with CUDA 11.8 support (from custom index)
+            pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+            
+            # Other dependencies (from PyPI)
             pip install \
-              torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 \
               diffusers \
               transformers \
               accelerate \
@@ -258,19 +267,19 @@ Resources:
               boto3 \
               python-multipart
             
-            # Create inference script
+            # Create inference script with memory optimization
             cat > inference_api.py << 'EOF'
             import os
             import torch
             from fastapi import FastAPI, File, UploadFile, Form
-            from fastapi.responses import FileResponse
-            from diffusers import StableDiffusionPipeline
+            from fastapi.responses import FileResponse, StreamingResponse
+            from diffusers import StableDiffusionPipeline, StableDiffusionImg2ImgPipeline
             import io
             from PIL import Image
             import uuid
             import boto3
             
-            app = FastAPI(title="Stable Diffusion API")
+            app = FastAPI(title="AI Anime Image Generation API")
             
             # Initialize model
             MODEL_ID = "${ModelName}"
@@ -279,6 +288,7 @@ Resources:
             print(f"Loading model: {MODEL_ID}")
             print(f"Using device: {DEVICE}")
             
+            # Load model with memory optimization
             pipe = StableDiffusionPipeline.from_pretrained(
                 MODEL_ID,
                 torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
@@ -286,8 +296,19 @@ Resources:
             )
             pipe = pipe.to(DEVICE)
             
-            # Enable optimization
+            # Enable memory optimization techniques
             pipe.enable_attention_slicing()
+            pipe.enable_vae_slicing()
+            
+            # Try to enable xformers if available (better memory efficiency)
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+                print("xformers enabled for memory efficiency")
+            except:
+                print("xformers not available, using standard attention")
+            
+            # Image-to-Image pipeline (lazy load)
+            img2img_pipe = None
             
             # S3 client
             s3_client = boto3.client('s3')
@@ -308,13 +329,19 @@ Resources:
                 try:
                     print(f"Generating image with prompt: {prompt}")
                     
+                    # Clear cache before generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
                     # Generate image
                     with torch.no_grad():
                         image = pipe(
                             prompt=prompt,
                             negative_prompt=negative_prompt,
                             num_inference_steps=num_inference_steps,
-                            guidance_scale=guidance_scale
+                            guidance_scale=guidance_scale,
+                            height=512,
+                            width=512
                         ).images[0]
                     
                     # Save to file
@@ -332,11 +359,17 @@ Resources:
                         except Exception as e:
                             print(f"S3 upload error: {e}")
                     
+                    # Clear cache after generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
                     return FileResponse(image_path, media_type="image/png", filename=f"{image_id}.png")
                 
                 except Exception as e:
                     print(f"Error during generation: {e}")
-                    raise
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    return {"status": "error", "message": str(e)}
             
             @app.post("/generate-json")
             async def generate_image_json(
@@ -346,13 +379,19 @@ Resources:
                 guidance_scale: float = Form(default=7.5)
             ):
                 try:
+                    # Clear cache before generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
                     # Generate image
                     with torch.no_grad():
                         image = pipe(
                             prompt=prompt,
                             negative_prompt=negative_prompt,
                             num_inference_steps=num_inference_steps,
-                            guidance_scale=guidance_scale
+                            guidance_scale=guidance_scale,
+                            height=512,
+                            width=512
                         ).images[0]
                     
                     # Save to bytes
@@ -366,6 +405,10 @@ Resources:
                     s3_client.upload_fileobj(img_bytes, bucket_name, s3_key)
                     s3_url = f"s3://{bucket_name}/{s3_key}"
                     
+                    # Clear cache after generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
                     return {
                         "status": "success",
                         "image_id": image_id,
@@ -374,6 +417,83 @@ Resources:
                     }
                 
                 except Exception as e:
+                    print(f"Error: {e}")
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    return {"status": "error", "message": str(e)}
+            
+            @app.post("/generate-img2img")
+            async def generate_img2img(
+                prompt: str = Form(...),
+                image: UploadFile = File(...),
+                negative_prompt: str = Form(default=""),
+                num_inference_steps: int = Form(default=30),
+                guidance_scale: float = Form(default=7.5),
+                strength: float = Form(default=0.75),
+                save_to_s3: bool = Form(default=False)
+            ):
+                global img2img_pipe
+                try:
+                    # Clear cache before generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
+                    # Initialize img2img pipeline if needed
+                    if img2img_pipe is None:
+                        print("Loading Image-to-Image pipeline...")
+                        img2img_pipe = StableDiffusionImg2ImgPipeline.from_pretrained(
+                            MODEL_ID,
+                            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+                            use_safetensors=True
+                        )
+                        img2img_pipe = img2img_pipe.to(DEVICE)
+                        img2img_pipe.enable_attention_slicing()
+                        img2img_pipe.enable_vae_slicing()
+                        print("Image-to-Image pipeline loaded!")
+                    
+                    # Load input image
+                    image_data = await image.read()
+                    input_image = Image.open(io.BytesIO(image_data)).convert("RGB")
+                    
+                    print(f"Generating image from input with prompt: {prompt}")
+                    
+                    # Generate image
+                    with torch.no_grad():
+                        result = img2img_pipe(
+                            prompt=prompt,
+                            image=input_image,
+                            negative_prompt=negative_prompt,
+                            num_inference_steps=num_inference_steps,
+                            guidance_scale=guidance_scale,
+                            strength=strength
+                        )
+                    
+                    output_image = result.images[0]
+                    
+                    # Save to file
+                    image_id = str(uuid.uuid4())
+                    image_path = f"/tmp/{image_id}.png"
+                    output_image.save(image_path)
+                    
+                    # Upload to S3 if requested
+                    if save_to_s3:
+                        try:
+                            s3_key = f"results/{image_id}.png"
+                            s3_client.upload_file(image_path, bucket_name, s3_key)
+                            print(f"Image saved to S3")
+                        except Exception as e:
+                            print(f"S3 upload error: {e}")
+                    
+                    # Clear cache after generation
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
+                    
+                    return FileResponse(image_path, media_type="image/png", filename=f"{image_id}.png")
+                
+                except Exception as e:
+                    print(f"Error: {e}")
+                    if DEVICE == "cuda":
+                        torch.cuda.empty_cache()
                     return {"status": "error", "message": str(e)}
             
             if __name__ == "__main__":

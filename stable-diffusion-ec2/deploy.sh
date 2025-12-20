@@ -32,21 +32,19 @@ echo -e "  Region: $REGION\n"
 
 # Prompt for parameters
 echo -e "${YELLOW}=== Configuration ===${NC}"
+echo -e "${YELLOW}(AWS Quota: 8 vCPU - g4dn.2xlarge is default)${NC}\n"
 
-read -p "EC2 Key Pair Name (e.g., stable-diffusion-key): " KEY_PAIR_NAME
-if [ -z "$KEY_PAIR_NAME" ]; then
-    echo -e "${RED}Error: Key pair name is required${NC}"
-    exit 1
-fi
+read -p "EC2 Key Pair Name (default: stable-diffusion-key): " KEY_PAIR_NAME
+KEY_PAIR_NAME=${KEY_PAIR_NAME:-stable-diffusion-key}
 
-read -p "Instance Type (default: g4dn.xlarge): " INSTANCE_TYPE
-INSTANCE_TYPE=${INSTANCE_TYPE:-g4dn.xlarge}
+read -p "Instance Type (default: g4dn.2xlarge): " INSTANCE_TYPE
+INSTANCE_TYPE=${INSTANCE_TYPE:-g4dn.2xlarge}
 
 read -p "Spot Max Price USD/hour (default: 0.50): " SPOT_MAX_PRICE
 SPOT_MAX_PRICE=${SPOT_MAX_PRICE:-0.50}
 
-read -p "Model Name (default: runwayml/stable-diffusion-v1-5): " MODEL_NAME
-MODEL_NAME=${MODEL_NAME:-runwayml/stable-diffusion-v1-5}
+read -p "Model Name (default: hakurei/waifu-diffusion): " MODEL_NAME
+MODEL_NAME=${MODEL_NAME:-hakurei/waifu-diffusion}
 
 read -p "Allowed SSH CIDR (default: 0.0.0.0/0, restrict in production): " ALLOWED_SSH_CIDR
 ALLOWED_SSH_CIDR=${ALLOWED_SSH_CIDR:-0.0.0.0/0}
@@ -59,7 +57,7 @@ STACK_NAME="stable-diffusion-stack"
 echo -e "\n${YELLOW}=== Summary ===${NC}"
 echo "Stack Name: $STACK_NAME"
 echo "Key Pair: $KEY_PAIR_NAME"
-echo "Instance Type: $INSTANCE_TYPE"
+echo "Instance Type: $INSTANCE_TYPE (vCPU: 8 max)"
 echo "Spot Max Price: \$$SPOT_MAX_PRICE/hour"
 echo "Model: $MODEL_NAME"
 echo "SSH CIDR: $ALLOWED_SSH_CIDR"
